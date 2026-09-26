@@ -559,8 +559,10 @@ def certify_image(
         raise ValueError("The Vertex adapter requires all dropout probabilities to be zero")
     center = image.unsqueeze(0)
     with torch.no_grad():
-        forward_max_abs_diff = float((model(center) - _stable_forward(model, center)).abs().max().cpu())
-    if forward_max_abs_diff > 1e-6:
+        reference_logits = model(center)
+        adapter_logits = _stable_forward(model, center)
+        forward_max_abs_diff = float((reference_logits - adapter_logits).abs().max().cpu())
+    if not torch.allclose(reference_logits, adapter_logits, atol=1e-5, rtol=1e-6):
         raise RuntimeError(f"Adapter forward does not match vitveri model: max_abs_diff={forward_max_abs_diff}")
     lower = torch.clamp(center - epsilon, min=-1.0, max=1.0)
     upper = torch.clamp(center + epsilon, min=-1.0, max=1.0)
