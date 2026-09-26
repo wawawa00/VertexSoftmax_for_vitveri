@@ -20,14 +20,44 @@ def _patch_tokens(model, image):
     batch, token_count, _ = x.shape
     cls = model.cls_token.expand(batch, -1, -1)
     x = torch.cat((cls, x), dim=1)
-    return model.dropout(x + model.pos_embedding[: token_count + 1])
+    return x + model.pos_embedding[: token_count + 1]
+
+
+def _attention_forward(attention_residual, z, *, return_parts=False):
+    prenorm = attention_residual.fn
+    attention = prenorm.fn
+    attention_input = prenorm.norm(z)
+    q = _split_heads(attention.to_q(attention_input), attention.heads)
+    k = _split_heads(attention.to_k(attention_input), attention.heads)
+    v = _split_heads(attention.to_v(attention_input), attention.heads)
+    scores = q.matmul(k.transpose(-1, -2)) * attention.scale
+    shifted = scores - scores.amax(dim=-1, keepdim=True)
+    exponentials = torch.exp(shifted)
+    probabilities = exponentials / exponentials.sum(dim=-1, keepdim=True)
+    context = probabilities.matmul(v).transpose(1, 2).reshape(z.shape)
+    output = attention.to_out[0] if isinstance(attention.to_out, torch.nn.Sequential) else attention.to_out
+    residual = z + output(context)
+    if return_parts:
+        return attention_input, scores, residual
+    return residual
+
+
+def _feed_forward(feed_forward_residual, z):
+    prenorm = feed_forward_residual.fn
+    linear1, _relu, _dropout1, linear2, _dropout2 = prenorm.fn.net
+    hidden = torch.relu(linear1(prenorm.norm(z)))
+    return z + linear2(hidden)
+
+
+def _transformer_layer(layer, z):
+    attention_residual, feed_forward_residual = layer
+    return _feed_forward(feed_forward_residual, _attention_forward(attention_residual, z))
 
 
 def _final_block_input(model, image):
     x = _patch_tokens(model, image)
-    for attention, feed_forward in model.transformer.layers[:-1]:
-        x = attention(x)
-        x = feed_forward(x)
+    for layer in model.transformer.layers[:-1]:
+        x = _transformer_layer(layer, x)
     return x
 
 
@@ -47,16 +77,21 @@ def _split_heads(tensor, heads):
 
 def _attention_parts(model, image):
     z = _final_block_input(model, image)
-    norm1, attention, output, _norm2, _feed_forward = _final_components(model)
-    attention_input = norm1(z)
-    q = _split_heads(attention.to_q(attention_input), attention.heads)
-    k = _split_heads(attention.to_k(attention_input), attention.heads)
-    v = _split_heads(attention.to_v(attention_input), attention.heads)
-    scores = q.matmul(k.transpose(-1, -2)) * attention.scale
-    probabilities = torch.softmax(scores, dim=-1)
-    context = probabilities.matmul(v).transpose(1, 2).reshape(z.shape)
-    residual = z + output(context)
+    attention_input, scores, residual = _attention_forward(
+        model.transformer.layers[-1][0],
+        z,
+        return_parts=True,
+    )
     return z, attention_input, scores, residual
+
+
+def _stable_forward(model, image):
+    z = _patch_tokens(model, image)
+    for layer in model.transformer.layers:
+        z = _transformer_layer(layer, z)
+    pooled = z[:, 0]
+    final_norm, classifier = model.mlp_head
+    return classifier(final_norm(pooled))
 
 
 class MarginModule(torch.nn.Module):
@@ -66,7 +101,7 @@ class MarginModule(torch.nn.Module):
         self.predicted_label = int(predicted_label)
 
     def forward(self, image):
-        logits = self.model(image)
+        logits = _stable_forward(self.model, image)
         predicted = logits[:, self.predicted_label : self.predicted_label + 1]
         return predicted - logits
 
@@ -284,7 +319,14 @@ def vertex_target_margins(model, center, lower, upper, predicted_label):
 
 
 def certify_image(model, image, epsilon, predicted_label, method, *, crown_method="CROWN", alpha_iters=20):
+    nonzero_dropout = [module.p for module in model.modules() if isinstance(module, torch.nn.Dropout) and module.p]
+    if nonzero_dropout:
+        raise ValueError("The Vertex adapter requires all dropout probabilities to be zero")
     center = image.unsqueeze(0)
+    with torch.no_grad():
+        forward_max_abs_diff = float((model(center) - _stable_forward(model, center)).abs().max().cpu())
+    if forward_max_abs_diff > 1e-6:
+        raise RuntimeError(f"Adapter forward does not match vitveri model: max_abs_diff={forward_max_abs_diff}")
     lower = torch.clamp(center - epsilon, min=-1.0, max=1.0)
     upper = torch.clamp(center + epsilon, min=-1.0, max=1.0)
     started = time.perf_counter()
@@ -322,4 +364,5 @@ def certify_image(model, image, epsilon, predicted_label, method, *, crown_metho
         "minimum_lower": float(finite.min().detach().cpu()),
         "certified": bool((finite > 0).all().item()),
         "elapsed_sec": time.perf_counter() - started,
+        "forward_max_abs_diff": forward_max_abs_diff,
     }
