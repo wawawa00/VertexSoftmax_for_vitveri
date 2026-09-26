@@ -34,6 +34,23 @@ def _direct_node_selector(expected_depth):
     return selected_layers, select
 
 
+def _validate_center_value(name, lower, upper, value):
+    value = value.detach().to(device=lower.device, dtype=lower.dtype)
+    tolerance = 1e-5 * (1.0 + value.abs())
+    lower_violation = float((lower - value - tolerance).amax().cpu())
+    upper_violation = float((value - upper - tolerance).amax().cpu())
+    if lower_violation > 0 or upper_violation > 0:
+        raise ValueError(
+            f"True {name} value is outside direct CROWN bounds: "
+            f"lower_violation={lower_violation}, upper_violation={upper_violation}"
+        )
+    print(
+        f"Direct CROWN {name} bounds contain the center forward value "
+        f"(lower_violation={lower_violation:.3e}, upper_violation={upper_violation:.3e}).",
+        flush=True,
+    )
+
+
 def run_direct_crown_bounds(config, model, image, true_label, predicted_label, image_index, device):
     """Run ABCROWN while capturing final-block inputs on its original CROWN pass."""
     abcrown_entry = config.resolve_external_path(config.verification["abcrown_entry"])
@@ -86,6 +103,11 @@ def run_direct_crown_bounds(config, model, image, true_label, predicted_label, i
     direct = getattr(verifier.net, CAPTURE_ATTRIBUTE)
     z_l, z_u = direct[final["block_input"]]
     attention_l, attention_u = direct[final["attention_input"]]
+    from .certifier import _attention_parts
+
+    true_z, true_attention, _true_scores, _true_residual = _attention_parts(model, image)
+    _validate_center_value("block input", z_l, z_u, true_z)
+    _validate_center_value("attention input", attention_l, attention_u, true_attention)
     bounds = verifier.last_computed_bounds
     lower = bounds["lower_bounds"]
     upper = bounds["upper_bounds"]
