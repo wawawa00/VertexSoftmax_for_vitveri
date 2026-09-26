@@ -162,6 +162,8 @@ class CrownProviderTest(unittest.TestCase):
                 "k": "/k",
                 "score_scaled": "/scaled",
                 "score_scaled_scale": "none",
+                "score_unscaled": "/qk",
+                "score_unscaled_scale": "by_dim",
                 "score_fallback_final_node": "/qk",
                 "score_fallback_scale": "by_dim",
                 "v": "/v",

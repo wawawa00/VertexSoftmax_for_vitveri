@@ -120,6 +120,8 @@ def discover_attention_layers(net, expected_depth):
                 "k": inputs[1],
                 "score_scaled": _node_name(node),
                 "score_scaled_scale": "by_dim",
+                "score_unscaled": None,
+                "score_unscaled_scale": "by_dim",
                 "score_fallback_final_node": _node_name(node),
                 "score_fallback_scale": "by_dim",
                 "v": None,
@@ -131,6 +133,7 @@ def discover_attention_layers(net, expected_depth):
             if score and score != current["score_fallback_final_node"]:
                 current["score_scaled"] = score
                 current["score_scaled_scale"] = "none"
+                current["score_unscaled"] = current["score_fallback_final_node"]
         elif current is not None and _node_type(node) == "BoundMatMul" and len(inputs) == 2 and inputs[0].endswith("/mul"):
             current["softmax"], current["v"] = inputs
         elif current is not None and _node_type(node) == "BoundRelu" and len(inputs) == 1:
@@ -162,15 +165,20 @@ def discover_attention_layers(net, expected_depth):
 def _score_bounds(bounds, net, image, model, layer):
     lower = bounds["lower_bounds"]
     upper = bounds["upper_bounds"]
-    node = layer["score_scaled"]
-    if node in lower:
-        score_l, score_u = lower[node], upper[node]
-        scale_mode = layer["score_scaled_scale"]
-    elif layer.get("score_unscaled") in lower:
-        node = layer["score_unscaled"]
-        score_l, score_u = lower[node], upper[node]
-        scale_mode = layer["score_unscaled_scale"]
-    else:
+    candidates = (
+        (layer.get("score_scaled"), layer.get("score_scaled_scale", "none")),
+        (layer.get("score_unscaled"), layer.get("score_unscaled_scale", "by_dim")),
+    )
+    score_l = score_u = scale_mode = None
+    for node, candidate_scale in candidates:
+        if node and node in lower and node in upper:
+            candidate_l = lower[node]
+            candidate_u = upper[node]
+            if not bool((candidate_l > candidate_u).any().item()):
+                score_l, score_u, scale_mode = candidate_l, candidate_u, candidate_scale
+                break
+            print(f"Ignoring inverted stored score bounds for node {node}.", flush=True)
+    if score_l is None:
         node = layer["score_fallback_final_node"]
         score_l, score_u = net.compute_bounds(
             x=(image,),
@@ -179,6 +187,8 @@ def _score_bounds(bounds, net, image, model, layer):
             reuse_alpha=False,
         )
         scale_mode = layer["score_fallback_scale"]
+        if bool((score_l > score_u).any().item()):
+            raise ValueError(f"ABCROWN returned inverted attention-score bounds for fallback node {node}")
     if scale_mode == "by_dim":
         scale = 1.0 / math.sqrt(model.dim // model.heads)
         score_l, score_u = score_l * scale, score_u * scale
