@@ -433,9 +433,11 @@ def _attention_residual_lower_projected(
 
 
 def vertex_target_margins_from_crown(model, lower, upper, predicted_label, crown_bounds):
-    if model.depth != 1:
-        raise NotImplementedError("The duplicated CROWN provider is connected to Vertex for depth=1 first")
-    z_l, z_u = _first_block_input_bounds(model, lower, upper)
+    if model.depth == 1:
+        z_l, z_u = _first_block_input_bounds(model, lower, upper)
+    else:
+        z_l = _token_tensor(crown_bounds.block_input_lower)
+        z_u = _token_tensor(crown_bounds.block_input_upper)
     value_l = _projected_value_tensor(crown_bounds.value_lower, model.heads)
     value_u = _projected_value_tensor(crown_bounds.value_upper, model.heads)
     score_l = _score_tensor(crown_bounds.score_lower, model.heads)
@@ -443,9 +445,11 @@ def vertex_target_margins_from_crown(model, lower, upper, predicted_label, crown
     pre_l = _token_tensor(crown_bounds.relu_lower)
     pre_u = _token_tensor(crown_bounds.relu_upper)
     expected_tokens = z_l.shape[1]
-    for name, tensor in (("value", value_l), ("relu", pre_l)):
+    for name, tensor in (("block input", z_l), ("value", value_l), ("relu", pre_l)):
         if tensor.shape[1] != expected_tokens:
             raise ValueError(f"{name} bounds have {tensor.shape[1]} tokens, expected {expected_tokens}")
+    if z_l.shape[2] != model.dim:
+        raise ValueError(f"block input bounds have width {z_l.shape[2]}, expected {model.dim}")
     if score_l.shape[-2:] != (expected_tokens, expected_tokens):
         raise ValueError(f"score bounds have shape {tuple(score_l.shape)}, expected (*, {expected_tokens}, {expected_tokens})")
     if score_l.shape[1] != model.heads:

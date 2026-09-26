@@ -63,6 +63,27 @@ def _softmax_score_node(exp_node, nodes):
     return (_input_names(shifted) or [None])[0] if shifted is not None else None
 
 
+def _block_input_node(q_name, nodes):
+    """Trace Q backwards through LayerNormNoVar to its residual input."""
+    pending = [q_name]
+    visited = set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        node = nodes.get(name)
+        if node is None:
+            continue
+        inputs = _input_names(node)
+        if _node_type(node) == "BoundSub" and len(inputs) == 2:
+            mean = nodes.get(inputs[1])
+            if mean is not None and _node_type(mean) == "BoundReduceMean":
+                return inputs[0]
+        pending.extend(input_name for input_name in inputs if input_name in nodes)
+    return None
+
+
 def discover_attention_layers(net, expected_depth):
     all_nodes = list(net.nodes())
     nodes = {_node_name(node): node for node in all_nodes}
@@ -95,9 +116,11 @@ def discover_attention_layers(net, expected_depth):
             current["relu_input"] = inputs[0]
     if current is not None:
         layers.append(current)
+    for layer in layers:
+        layer["block_input"] = _block_input_node(layer["q"], nodes)
     if len(layers) != expected_depth:
         raise ValueError(f"Discovered {len(layers)} attention layers, expected {expected_depth}")
-    required = ("q", "k", "v", "softmax", "relu_input", "score_fallback_final_node")
+    required = ("q", "k", "v", "softmax", "relu_input", "block_input", "score_fallback_final_node")
     for index, layer in enumerate(layers):
         missing = [key for key in required if not layer.get(key)]
         if missing:
@@ -149,6 +172,8 @@ def _target_vector(values, predicted_label, num_classes, device, dtype):
 class CrownBounds:
     initial_target_lowers: object
     alpha_target_lowers: object
+    block_input_lower: object
+    block_input_upper: object
     score_lower: object
     score_upper: object
     value_lower: object
@@ -217,6 +242,7 @@ def run_crown_bounds(config, model, image, true_label, predicted_label, image_in
     upper = bounds["upper_bounds"]
     value_l, value_u = _checked_bounds(lower, upper, final["v"])
     relu_l, relu_u = _checked_bounds(lower, upper, final["relu_input"])
+    block_l, block_u = _checked_bounds(lower, upper, final["block_input"])
     if bool((score_l > score_u).any().item()):
         raise ValueError("ABCROWN returned inverted attention-score bounds")
     dtype = image.dtype
@@ -235,6 +261,8 @@ def run_crown_bounds(config, model, image, true_label, predicted_label, image_in
             image.device,
             dtype,
         ),
+        block_input_lower=block_l.detach().to(image.device, dtype=dtype),
+        block_input_upper=block_u.detach().to(image.device, dtype=dtype),
         score_lower=score_l.detach().to(image.device, dtype=dtype),
         score_upper=score_u.detach().to(image.device, dtype=dtype),
         value_lower=value_l.detach().to(image.device, dtype=dtype),

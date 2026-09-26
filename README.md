@@ -45,8 +45,8 @@ certificate path then applies the upstream exact score-box primitive to the
 final attention block, with an ABCROWN boundary provider owned by this
 repository and an affine/ReLU suffix for the CLS-token classifier. The central
 vitveri YAML and checkpoint are shared inputs; the CROWN extraction code is not
-imported from vitveri at run time. The current end-to-end certificate supports
-the depth-1 model while the adapter is being extended to deeper prefixes.
+imported from vitveri at run time. For deeper models, CROWN bounds the prefix up
+to the final transformer block and Vertex-Softmax certifies that final block.
 
 ```bash
 PYTHONPATH=. python -m vertex_vitveri.cli \

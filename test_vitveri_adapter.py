@@ -24,6 +24,14 @@ class BoundRelu(BoundMatMul):
     pass
 
 
+class BoundReduceMean(BoundMatMul):
+    pass
+
+
+class BoundSub(BoundMatMul):
+    pass
+
+
 class FakeNode:
     def __init__(self, name, inputs=()):
         self.name = name
@@ -97,8 +105,11 @@ class VitveriAdapterConfigTest(unittest.TestCase):
 
 class CrownProviderTest(unittest.TestCase):
     def test_discovers_scaled_attention_nodes(self):
-        q = FakeNode("/q")
-        k = FakeNode("/k")
+        block_input = FakeNode("/block_input")
+        mean = BoundReduceMean("/mean", [block_input], nonlinear=False)
+        centered = BoundSub("/centered", [block_input, mean], nonlinear=False)
+        q = FakeNode("/q", [centered])
+        k = FakeNode("/k", [centered])
         score = BoundMatMul("/qk", [q, k])
         scaled = FakeNode("/scaled")
         reduce_max = FakeNode("/max")
@@ -111,7 +122,24 @@ class CrownProviderTest(unittest.TestCase):
         relu = BoundRelu("/relu", [relu_input])
 
         layers = discover_attention_layers(
-            FakeNet([q, k, score, scaled, reduce_max, shifted, exp, probabilities, value, context, relu]),
+            FakeNet(
+                [
+                    block_input,
+                    mean,
+                    centered,
+                    q,
+                    k,
+                    score,
+                    scaled,
+                    reduce_max,
+                    shifted,
+                    exp,
+                    probabilities,
+                    value,
+                    context,
+                    relu,
+                ]
+            ),
             expected_depth=1,
         )
 
@@ -127,6 +155,7 @@ class CrownProviderTest(unittest.TestCase):
                 "v": "/v",
                 "softmax": "/softmax/mul",
                 "relu_input": "/relu_input",
+                "block_input": "/block_input",
             },
         )
 
