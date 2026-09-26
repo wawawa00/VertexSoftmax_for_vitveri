@@ -5,6 +5,39 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vertex_vitveri.config import load_adapter_config
+from vertex_vitveri.crown_provider import discover_attention_layers
+
+
+class BoundMatMul:
+    def __init__(self, name, inputs, *, nonlinear=True):
+        self.name = name
+        self.inputs = inputs
+        self.perturbed = nonlinear
+        self.requires_input_bounds = [0] if nonlinear else []
+
+
+class BoundExp(BoundMatMul):
+    pass
+
+
+class BoundRelu(BoundMatMul):
+    pass
+
+
+class FakeNode:
+    def __init__(self, name, inputs=()):
+        self.name = name
+        self.inputs = list(inputs)
+        self.perturbed = False
+        self.requires_input_bounds = []
+
+
+class FakeNet:
+    def __init__(self, nodes):
+        self._nodes = nodes
+
+    def nodes(self):
+        return self._nodes
 
 
 class VitveriAdapterConfigTest(unittest.TestCase):
@@ -60,6 +93,50 @@ class VitveriAdapterConfigTest(unittest.TestCase):
             with patch("vertex_vitveri.config._load_central_config", return_value=parsed):
                 with self.assertRaisesRegex(ValueError, "layer_norm_type=no_var"):
                     load_adapter_config(config_path, vitveri_root=root)
+
+
+class CrownProviderTest(unittest.TestCase):
+    def test_discovers_scaled_attention_nodes(self):
+        q = FakeNode("/q")
+        k = FakeNode("/k")
+        score = BoundMatMul("/qk", [q, k])
+        scaled = FakeNode("/scaled")
+        reduce_max = FakeNode("/max")
+        shifted = FakeNode("/shifted", [scaled, reduce_max])
+        exp = BoundExp("/exp", [shifted])
+        probabilities = FakeNode("/softmax/mul")
+        value = FakeNode("/v")
+        context = BoundMatMul("/context", [probabilities, value])
+        relu_input = FakeNode("/relu_input")
+        relu = BoundRelu("/relu", [relu_input])
+
+        layers = discover_attention_layers(
+            FakeNet([q, k, score, scaled, reduce_max, shifted, exp, probabilities, value, context, relu]),
+            expected_depth=1,
+        )
+
+        self.assertEqual(
+            layers[0],
+            {
+                "q": "/q",
+                "k": "/k",
+                "score_scaled": "/scaled",
+                "score_scaled_scale": "none",
+                "score_fallback_final_node": "/qk",
+                "score_fallback_scale": "by_dim",
+                "v": "/v",
+                "softmax": "/softmax/mul",
+                "relu_input": "/relu_input",
+            },
+        )
+
+    def test_rejects_incomplete_attention_layer(self):
+        q = FakeNode("/q")
+        k = FakeNode("/k")
+        score = BoundMatMul("/qk", [q, k])
+
+        with self.assertRaisesRegex(ValueError, "missing nodes"):
+            discover_attention_layers(FakeNet([q, k, score]), expected_depth=1)
 
 
 if __name__ == "__main__":

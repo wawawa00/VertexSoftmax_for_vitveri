@@ -42,8 +42,11 @@ PYTHONPATH=. python -m vertex_vitveri.cli \
 The first integration stage performs an adapter check for one image: it loads
 the shared checkpoint and records the selected image and clean prediction. The
 certificate path then applies the upstream exact score-box primitive to the
-final attention block, with a vitveri-specific CROWN prefix and affine/ReLU
-suffix for the CLS-token classifier.
+final attention block, with an ABCROWN boundary provider owned by this
+repository and an affine/ReLU suffix for the CLS-token classifier. The central
+vitveri YAML and checkpoint are shared inputs; the CROWN extraction code is not
+imported from vitveri at run time. The current end-to-end certificate supports
+the depth-1 model while the adapter is being extended to deeper prefixes.
 
 ```bash
 PYTHONPATH=. python -m vertex_vitveri.cli \

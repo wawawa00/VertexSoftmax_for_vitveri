@@ -180,7 +180,17 @@ def _no_var_affine(layer):
     return matrix, layer.bias
 
 
-def _suffix_coefficients(model, h_lower, h_upper, predicted_label, target_label, slope_policy):
+def _suffix_coefficients(
+    model,
+    h_lower,
+    h_upper,
+    predicted_label,
+    target_label,
+    slope_policy,
+    *,
+    pre_lower=None,
+    pre_upper=None,
+):
     _norm1, _attention, _output, norm2, feed_forward = _final_components(model)
     final_norm, classifier = model.mlp_head
     ff_linear1, _relu, _dropout1, ff_linear2, _dropout2 = feed_forward.net
@@ -194,10 +204,14 @@ def _suffix_coefficients(model, h_lower, h_upper, predicted_label, target_label,
     norm2_matrix, norm2_bias = _no_var_affine(norm2)
     pre_matrix = ff_linear1.weight.matmul(norm2_matrix)
     pre_bias = ff_linear1.weight.matmul(norm2_bias) + ff_linear1.bias
-    h_l = h_lower[0, 0]
-    h_u = h_upper[0, 0]
-    pre_l = pre_bias + torch.where(pre_matrix >= 0, pre_matrix * h_l, pre_matrix * h_u).sum(dim=1)
-    pre_u = pre_bias + torch.where(pre_matrix >= 0, pre_matrix * h_u, pre_matrix * h_l).sum(dim=1)
+    if pre_lower is None or pre_upper is None:
+        h_l = h_lower[0, 0]
+        h_u = h_upper[0, 0]
+        pre_l = pre_bias + torch.where(pre_matrix >= 0, pre_matrix * h_l, pre_matrix * h_u).sum(dim=1)
+        pre_u = pre_bias + torch.where(pre_matrix >= 0, pre_matrix * h_u, pre_matrix * h_l).sum(dim=1)
+    else:
+        pre_l = pre_lower.reshape(-1, pre_lower.shape[-1])[0]
+        pre_u = pre_upper.reshape(-1, pre_upper.shape[-1])[0]
 
     hidden_coeff = ff_linear2.weight.t().matmul(residual_coeff)
     active = pre_l >= 0
@@ -221,11 +235,12 @@ def _suffix_coefficients(model, h_lower, h_upper, predicted_label, target_label,
 
     coeff_cls = residual_coeff + (hidden_coeff[:, None] * slope[:, None] * pre_matrix).sum(dim=0)
     bias = bias + (hidden_coeff * (slope * pre_bias + intercept)).sum()
+    reference = pre_lower if pre_lower is not None else h_lower
     coefficients = torch.zeros(
-        h_lower.shape[1],
-        h_lower.shape[2],
-        device=h_lower.device,
-        dtype=h_lower.dtype,
+        model.pos_embedding.shape[0],
+        model.dim,
+        device=reference.device,
+        dtype=reference.dtype,
     )
     coefficients[0] = coeff_cls
     return coefficients, bias
@@ -318,7 +333,177 @@ def vertex_target_margins(model, center, lower, upper, predicted_label):
     return result
 
 
-def certify_image(model, image, epsilon, predicted_label, method, *, crown_method="CROWN", alpha_iters=20):
+def _first_block_input_bounds(model, lower, upper):
+    rearrange = model.to_patch_embedding[0]
+    linear = model.to_patch_embedding[1]
+    patch_l = rearrange(lower)
+    patch_u = rearrange(upper)
+    weight = linear.weight
+    embedded_l = linear.bias + torch.where(weight >= 0, patch_l[:, :, None, :] * weight, patch_u[:, :, None, :] * weight).sum(dim=3)
+    embedded_u = linear.bias + torch.where(weight >= 0, patch_u[:, :, None, :] * weight, patch_l[:, :, None, :] * weight).sum(dim=3)
+    cls = model.cls_token.expand(lower.shape[0], -1, -1)
+    positions = model.pos_embedding[: embedded_l.shape[1] + 1]
+    z_l = torch.cat((cls, embedded_l), dim=1) + positions
+    z_u = torch.cat((cls, embedded_u), dim=1) + positions
+    return z_l, z_u
+
+
+def _score_tensor(value, heads):
+    while value.dim() > 4 and value.shape[0] == 1:
+        value = value.squeeze(0)
+    if value.dim() == 2:
+        return value.unsqueeze(0).unsqueeze(0)
+    if value.dim() == 3:
+        if value.shape[0] == heads:
+            return value.unsqueeze(0)
+        return value.unsqueeze(1)
+    if value.dim() == 4:
+        return value
+    raise ValueError(f"Unsupported score-bound shape: {tuple(value.shape)}")
+
+
+def _token_tensor(value):
+    while value.dim() > 3 and value.shape[0] == 1:
+        value = value.squeeze(0)
+    if value.dim() == 2:
+        return value.unsqueeze(0)
+    if value.dim() == 3:
+        return value
+    raise ValueError(f"Unsupported token-bound shape: {tuple(value.shape)}")
+
+
+def _projected_value_tensor(value, heads):
+    while value.dim() > 4 and value.shape[0] == 1:
+        value = value.squeeze(0)
+    if value.dim() == 4:
+        batch, value_heads, tokens, head_dim = value.shape
+        if value_heads != heads:
+            raise ValueError(f"Value bounds have {value_heads} heads, expected {heads}")
+        return value.transpose(1, 2).reshape(batch, tokens, value_heads * head_dim)
+    if value.dim() == 3 and value.shape[0] == heads and heads > 1:
+        value_heads, tokens, head_dim = value.shape
+        return value.transpose(0, 1).reshape(1, tokens, value_heads * head_dim)
+    return _token_tensor(value)
+
+
+def _attention_residual_lower_projected(
+    model,
+    z_lower,
+    z_upper,
+    value_lower,
+    value_upper,
+    score_lower,
+    score_upper,
+    coefficients,
+    bias,
+):
+    _norm1, attention, output, _norm2, _feed_forward = _final_components(model)
+    total = torch.as_tensor(bias, device=z_lower.device, dtype=z_lower.dtype).reshape(1)
+    total = total + torch.where(coefficients >= 0, coefficients * z_lower, coefficients * z_upper).sum((1, 2))
+    if isinstance(output, torch.nn.Identity):
+        output_direction = coefficients
+        output_bias = None
+    else:
+        output_direction = coefficients.matmul(output.weight)
+        output_bias = output.bias
+    if output_bias is not None:
+        total = total + coefficients.matmul(output_bias).sum()
+
+    head_dim = attention.to_v.out_features // attention.heads
+    row_lowers = []
+    for head in range(attention.heads):
+        start = head * head_dim
+        end = (head + 1) * head_dim
+        direction = output_direction[:, start:end]
+        v_l = value_lower[:, :, start:end]
+        v_u = value_upper[:, :, start:end]
+        value_coeff = torch.where(
+            direction[None, :, None, :] >= 0,
+            direction[None, :, None, :] * v_l[:, None, :, :],
+            direction[None, :, None, :] * v_u[:, None, :, :],
+        ).sum(dim=3)
+        row_lowers.append(
+            softmax_box_expectation_min(
+                score_lower[:, head],
+                score_upper[:, head],
+                value_coeff,
+            ).sum(dim=1)
+        )
+    return total + torch.stack(row_lowers).sum(dim=0)
+
+
+def vertex_target_margins_from_crown(model, lower, upper, predicted_label, crown_bounds):
+    if model.depth != 1:
+        raise NotImplementedError("The duplicated CROWN provider is connected to Vertex for depth=1 first")
+    z_l, z_u = _first_block_input_bounds(model, lower, upper)
+    value_l = _projected_value_tensor(crown_bounds.value_lower, model.heads)
+    value_u = _projected_value_tensor(crown_bounds.value_upper, model.heads)
+    score_l = _score_tensor(crown_bounds.score_lower, model.heads)
+    score_u = _score_tensor(crown_bounds.score_upper, model.heads)
+    pre_l = _token_tensor(crown_bounds.relu_lower)
+    pre_u = _token_tensor(crown_bounds.relu_upper)
+    expected_tokens = z_l.shape[1]
+    for name, tensor in (("value", value_l), ("relu", pre_l)):
+        if tensor.shape[1] != expected_tokens:
+            raise ValueError(f"{name} bounds have {tensor.shape[1]} tokens, expected {expected_tokens}")
+    if score_l.shape[-2:] != (expected_tokens, expected_tokens):
+        raise ValueError(f"score bounds have shape {tuple(score_l.shape)}, expected (*, {expected_tokens}, {expected_tokens})")
+    if score_l.shape[1] != model.heads:
+        raise ValueError(f"score bounds have {score_l.shape[1]} heads, expected {model.heads}")
+    if value_l.shape[2] != model.dim:
+        raise ValueError(f"value bounds have width {value_l.shape[2]}, expected {model.dim}")
+    if pre_l.shape[2] != model.transformer.layers[-1][1].fn.fn.net[0].out_features:
+        raise ValueError("ReLU pre-activation bounds have an unexpected width")
+
+    result = torch.full(
+        (model.mlp_head[-1].out_features,),
+        float("inf"),
+        device=lower.device,
+        dtype=lower.dtype,
+    )
+    for target in range(result.numel()):
+        if target == predicted_label:
+            continue
+        candidates = []
+        for policy in ("auto", "zero", "identity"):
+            coefficients, bias = _suffix_coefficients(
+                model,
+                None,
+                None,
+                predicted_label,
+                target,
+                policy,
+                pre_lower=pre_l,
+                pre_upper=pre_u,
+            )
+            candidates.append(
+                _attention_residual_lower_projected(
+                    model,
+                    z_l,
+                    z_u,
+                    value_l,
+                    value_u,
+                    score_l,
+                    score_u,
+                    coefficients,
+                    bias,
+                )
+            )
+        result[target] = torch.stack(candidates).amax().detach()
+    return result
+
+
+def certify_image(
+    model,
+    image,
+    epsilon,
+    predicted_label,
+    method,
+    *,
+    crown_method="CROWN",
+    alpha_iters=20,
+    crown_bounds=None,
+):
     nonzero_dropout = [module.p for module in model.modules() if isinstance(module, torch.nn.Dropout) and module.p]
     if nonzero_dropout:
         raise ValueError("The Vertex adapter requires all dropout probabilities to be zero")
@@ -333,18 +518,16 @@ def certify_image(model, image, epsilon, predicted_label, method, *, crown_metho
 
     crown = None
     vertex = None
+    if crown_bounds is None:
+        raise ValueError("crown_bounds from the duplicated ABCROWN provider are required")
     if method in {"CROWN", "crown_objective_vertex_hybrid"}:
-        crown = crown_target_margins(
-            model,
-            center,
-            lower,
-            upper,
-            predicted_label,
-            crown_method,
-            alpha_iters,
+        crown = (
+            crown_bounds.alpha_target_lowers
+            if crown_method == "alpha-CROWN"
+            else crown_bounds.initial_target_lowers
         )
     if method in {"objective_vertex_crown", "crown_objective_vertex_hybrid"}:
-        vertex = vertex_target_margins(model, center, lower, upper, predicted_label)
+        vertex = vertex_target_margins_from_crown(model, lower, upper, predicted_label, crown_bounds)
 
     if method == "CROWN":
         selected = crown

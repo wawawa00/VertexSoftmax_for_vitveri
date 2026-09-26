@@ -132,6 +132,13 @@ class AdapterConfig:
             "vertex": self.vertex,
         }
 
+    def resolve_external_path(self, value):
+        path = Path(value).expanduser()
+        if path.is_absolute():
+            return path.resolve()
+        candidates = (Path.cwd() / path, self.vitveri_root / path, self.config_path.parent / path)
+        return _first_existing(candidates, str(value))
+
 
 def load_adapter_config(path, *, vitveri_root=None):
     config_path = Path(path).expanduser().resolve()

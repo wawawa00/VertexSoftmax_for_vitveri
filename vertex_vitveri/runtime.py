@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 from .config import AdapterConfig
 
@@ -111,6 +112,19 @@ def run_certification(config: AdapterConfig, task_id: int):
         raise FileNotFoundError(f"auto_LiRPA source tree is missing under {config.alpha_beta_crown_root}")
     model, image, true_label, predicted_label, image_index, device = _load_image_context(config, task_id)
     from .certifier import certify_image
+    from .crown_provider import run_crown_bounds
+
+    started = time.perf_counter()
+    crown_bounds = run_crown_bounds(
+        config,
+        model,
+        image.unsqueeze(0),
+        true_label,
+        predicted_label,
+        image_index,
+        device,
+    )
+    crown_elapsed = time.perf_counter() - started
 
     certificate = certify_image(
         model,
@@ -120,7 +134,12 @@ def run_certification(config: AdapterConfig, task_id: int):
         config.method,
         crown_method=config.vertex["crown_method"],
         alpha_iters=int(config.vertex["alpha_iters"]),
+        crown_bounds=crown_bounds,
     )
+    postprocess_elapsed = certificate.pop("elapsed_sec")
+    certificate["crown_elapsed_sec"] = crown_elapsed
+    certificate["postprocess_elapsed_sec"] = postprocess_elapsed
+    certificate["elapsed_sec"] = time.perf_counter() - started
     result = {
         "status": "complete",
         "method": config.method,
@@ -132,6 +151,7 @@ def run_certification(config: AdapterConfig, task_id: int):
         "weight_path": str(config.weight_path),
         "device": str(device),
         "job_id": os.environ.get("JOB_ID", ""),
+        "attention_nodes": crown_bounds.attention_layers,
         **certificate,
     }
     output_dir = _result_dir(config)
