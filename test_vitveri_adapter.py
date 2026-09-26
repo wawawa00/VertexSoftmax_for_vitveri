@@ -32,11 +32,15 @@ class BoundSub(BoundMatMul):
     pass
 
 
+class BoundTranspose(BoundMatMul):
+    pass
+
+
 class FakeNode:
-    def __init__(self, name, inputs=()):
+    def __init__(self, name, inputs=(), *, perturbed=False):
         self.name = name
         self.inputs = list(inputs)
-        self.perturbed = False
+        self.perturbed = perturbed
         self.requires_input_bounds = []
 
 
@@ -108,7 +112,12 @@ class CrownProviderTest(unittest.TestCase):
         block_input = FakeNode("/block_input")
         mean = BoundReduceMean("/mean", [block_input], nonlinear=False)
         centered = BoundSub("/centered", [block_input, mean], nonlinear=False)
-        q = FakeNode("/q", [centered])
+        normalized = FakeNode("/normalized", [centered], perturbed=True)
+        q_weight = FakeNode("/q_weight")
+        q_projection = BoundMatMul("/q_projection", [normalized, q_weight], nonlinear=False)
+        q_projection.perturbed = True
+        q = BoundTranspose("/q", [q_projection], nonlinear=False)
+        q.perturbed = True
         k = FakeNode("/k", [centered])
         score = BoundMatMul("/qk", [q, k])
         scaled = FakeNode("/scaled")
@@ -127,6 +136,9 @@ class CrownProviderTest(unittest.TestCase):
                     block_input,
                     mean,
                     centered,
+                    normalized,
+                    q_weight,
+                    q_projection,
                     q,
                     k,
                     score,
@@ -156,6 +168,7 @@ class CrownProviderTest(unittest.TestCase):
                 "softmax": "/softmax/mul",
                 "relu_input": "/relu_input",
                 "block_input": "/block_input",
+                "attention_input": "/normalized",
             },
         )
 

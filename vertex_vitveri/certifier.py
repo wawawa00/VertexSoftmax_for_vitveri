@@ -386,6 +386,17 @@ def _projected_value_tensor(value, heads):
     return _token_tensor(value)
 
 
+def _centered_block_input_bounds(model, lower, upper):
+    norm, _attention, _output, _norm2, _feed_forward = _final_components(model)
+    weight = norm.weight.reshape(1, 1, -1)
+    bias = norm.bias.reshape(1, 1, -1)
+    if bool((weight.abs() < 1e-12).any().item()):
+        raise ValueError("Cannot recover centered block input through a zero LayerNorm weight")
+    first = (lower - bias) / weight
+    second = (upper - bias) / weight
+    return torch.minimum(first, second), torch.maximum(first, second)
+
+
 def _attention_residual_lower_projected(
     model,
     z_lower,
@@ -436,8 +447,9 @@ def vertex_target_margins_from_crown(model, lower, upper, predicted_label, crown
     if model.depth == 1:
         z_l, z_u = _first_block_input_bounds(model, lower, upper)
     else:
-        z_l = _token_tensor(crown_bounds.block_input_lower)
-        z_u = _token_tensor(crown_bounds.block_input_upper)
+        attention_l = _token_tensor(crown_bounds.attention_input_lower)
+        attention_u = _token_tensor(crown_bounds.attention_input_upper)
+        z_l, z_u = _centered_block_input_bounds(model, attention_l, attention_u)
     value_l = _projected_value_tensor(crown_bounds.value_lower, model.heads)
     value_u = _projected_value_tensor(crown_bounds.value_upper, model.heads)
     score_l = _score_tensor(crown_bounds.score_lower, model.heads)
@@ -480,6 +492,13 @@ def vertex_target_margins_from_crown(model, lower, upper, predicted_label, crown
                 pre_lower=pre_l,
                 pre_upper=pre_u,
             )
+            if model.depth > 1:
+                coefficient_drift = coefficients.sum(dim=1).abs().max()
+                if float(coefficient_drift.detach().cpu()) > 1e-5:
+                    raise ValueError(
+                        f"Final-block objective is not shift invariant: coefficient sum={coefficient_drift.item()}"
+                    )
+                coefficients = coefficients - coefficients.mean(dim=1, keepdim=True)
             candidates.append(
                 _attention_residual_lower_projected(
                     model,

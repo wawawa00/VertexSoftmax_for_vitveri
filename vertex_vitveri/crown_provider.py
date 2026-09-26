@@ -84,6 +84,27 @@ def _block_input_node(q_name, nodes):
     return None
 
 
+def _attention_input_node(q_name, nodes):
+    """Trace Q backwards to the normalized input of its linear projection."""
+    pending = [q_name]
+    visited = set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        node = nodes.get(name)
+        if node is None:
+            continue
+        inputs = _input_names(node)
+        if _node_type(node) == "BoundMatMul" and len(inputs) == 2:
+            perturbed = [input_name for input_name in inputs if bool(getattr(nodes.get(input_name), "perturbed", False))]
+            if len(perturbed) == 1:
+                return perturbed[0]
+        pending.extend(input_name for input_name in inputs if input_name in nodes)
+    return None
+
+
 def discover_attention_layers(net, expected_depth):
     all_nodes = list(net.nodes())
     nodes = {_node_name(node): node for node in all_nodes}
@@ -118,9 +139,19 @@ def discover_attention_layers(net, expected_depth):
         layers.append(current)
     for layer in layers:
         layer["block_input"] = _block_input_node(layer["q"], nodes)
+        layer["attention_input"] = _attention_input_node(layer["q"], nodes)
     if len(layers) != expected_depth:
         raise ValueError(f"Discovered {len(layers)} attention layers, expected {expected_depth}")
-    required = ("q", "k", "v", "softmax", "relu_input", "block_input", "score_fallback_final_node")
+    required = (
+        "q",
+        "k",
+        "v",
+        "softmax",
+        "relu_input",
+        "block_input",
+        "attention_input",
+        "score_fallback_final_node",
+    )
     for index, layer in enumerate(layers):
         missing = [key for key in required if not layer.get(key)]
         if missing:
@@ -172,8 +203,8 @@ def _target_vector(values, predicted_label, num_classes, device, dtype):
 class CrownBounds:
     initial_target_lowers: object
     alpha_target_lowers: object
-    block_input_lower: object
-    block_input_upper: object
+    attention_input_lower: object
+    attention_input_upper: object
     score_lower: object
     score_upper: object
     value_lower: object
@@ -188,23 +219,6 @@ def _checked_bounds(lower, upper, node_name):
         raise KeyError(f"ABCROWN did not store bounds for node {node_name}")
     node_lower = lower[node_name]
     node_upper = upper[node_name]
-    if bool((node_lower > node_upper).any().item()):
-        raise ValueError(f"ABCROWN returned inverted bounds for node {node_name}")
-    return node_lower, node_upper
-
-
-def _stored_or_computed_bounds(bounds, net, image, node_name):
-    lower = bounds["lower_bounds"]
-    upper = bounds["upper_bounds"]
-    if node_name in lower and node_name in upper:
-        return _checked_bounds(lower, upper, node_name)
-    print(f"Computing CROWN bounds for unstored node {node_name}...", flush=True)
-    node_lower, node_upper = net.compute_bounds(
-        x=(image,),
-        method="backward",
-        final_node_name=node_name,
-        reuse_alpha=False,
-    )
     if bool((node_lower > node_upper).any().item()):
         raise ValueError(f"ABCROWN returned inverted bounds for node {node_name}")
     return node_lower, node_upper
@@ -259,7 +273,7 @@ def run_crown_bounds(config, model, image, true_label, predicted_label, image_in
     upper = bounds["upper_bounds"]
     value_l, value_u = _checked_bounds(lower, upper, final["v"])
     relu_l, relu_u = _checked_bounds(lower, upper, final["relu_input"])
-    block_l, block_u = _stored_or_computed_bounds(bounds, net, image, final["block_input"])
+    attention_l, attention_u = _checked_bounds(lower, upper, final["attention_input"])
     if bool((score_l > score_u).any().item()):
         raise ValueError("ABCROWN returned inverted attention-score bounds")
     dtype = image.dtype
@@ -278,8 +292,8 @@ def run_crown_bounds(config, model, image, true_label, predicted_label, image_in
             image.device,
             dtype,
         ),
-        block_input_lower=block_l.detach().to(image.device, dtype=dtype),
-        block_input_upper=block_u.detach().to(image.device, dtype=dtype),
+        attention_input_lower=attention_l.detach().to(image.device, dtype=dtype),
+        attention_input_upper=attention_u.detach().to(image.device, dtype=dtype),
         score_lower=score_l.detach().to(image.device, dtype=dtype),
         score_upper=score_u.detach().to(image.device, dtype=dtype),
         value_lower=value_l.detach().to(image.device, dtype=dtype),
