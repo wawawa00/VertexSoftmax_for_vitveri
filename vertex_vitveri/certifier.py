@@ -397,6 +397,27 @@ def _centered_block_input_bounds(model, lower, upper):
     return torch.minimum(first, second), torch.maximum(first, second)
 
 
+def _attention_input_bounds_from_query(model, query_lower, query_upper):
+    _norm, attention, _output, _norm2, _feed_forward = _final_components(model)
+    weight = attention.to_q.weight.detach().to(dtype=torch.float64)
+    if weight.shape[0] != weight.shape[1]:
+        raise ValueError(f"Q projection must be square to recover its input, got {tuple(weight.shape)}")
+    condition = torch.linalg.cond(weight)
+    if not bool(torch.isfinite(condition).item()) or float(condition.cpu()) > 1e8:
+        raise ValueError(f"Q projection is too ill-conditioned to invert safely: condition={condition.item()}")
+    inverse = torch.linalg.inv(weight.t())
+    q_l = query_lower.to(dtype=torch.float64).unsqueeze(-1)
+    q_u = query_upper.to(dtype=torch.float64).unsqueeze(-1)
+    normalized_l = torch.where(inverse >= 0, q_l * inverse, q_u * inverse).sum(dim=-2)
+    normalized_u = torch.where(inverse >= 0, q_u * inverse, q_l * inverse).sum(dim=-2)
+    roundoff = 1e-6 * (1.0 + torch.maximum(normalized_l.abs(), normalized_u.abs()))
+    return (
+        (normalized_l - roundoff).to(dtype=query_lower.dtype),
+        (normalized_u + roundoff).to(dtype=query_upper.dtype),
+        float(condition.cpu()),
+    )
+
+
 def _attention_residual_lower_projected(
     model,
     z_lower,
@@ -446,9 +467,15 @@ def _attention_residual_lower_projected(
 def vertex_target_margins_from_crown(model, lower, upper, predicted_label, crown_bounds):
     if model.depth == 1:
         z_l, z_u = _first_block_input_bounds(model, lower, upper)
+        query_projection_condition = None
     else:
-        attention_l = _token_tensor(crown_bounds.attention_input_lower)
-        attention_u = _token_tensor(crown_bounds.attention_input_upper)
+        query_l = _projected_value_tensor(crown_bounds.query_lower, model.heads)
+        query_u = _projected_value_tensor(crown_bounds.query_upper, model.heads)
+        attention_l, attention_u, query_projection_condition = _attention_input_bounds_from_query(
+            model,
+            query_l,
+            query_u,
+        )
         z_l, z_u = _centered_block_input_bounds(model, attention_l, attention_u)
     value_l = _projected_value_tensor(crown_bounds.value_lower, model.heads)
     value_u = _projected_value_tensor(crown_bounds.value_upper, model.heads)
@@ -513,7 +540,7 @@ def vertex_target_margins_from_crown(model, lower, upper, predicted_label, crown
                 )
             )
         result[target] = torch.stack(candidates).amax().detach()
-    return result
+    return result, query_projection_condition
 
 
 def certify_image(
@@ -550,7 +577,15 @@ def certify_image(
             else crown_bounds.initial_target_lowers
         )
     if method in {"objective_vertex_crown", "crown_objective_vertex_hybrid"}:
-        vertex = vertex_target_margins_from_crown(model, lower, upper, predicted_label, crown_bounds)
+        vertex, query_projection_condition = vertex_target_margins_from_crown(
+            model,
+            lower,
+            upper,
+            predicted_label,
+            crown_bounds,
+        )
+    else:
+        query_projection_condition = None
 
     if method == "CROWN":
         selected = crown
@@ -571,4 +606,5 @@ def certify_image(
         "certified": bool((finite > 0).all().item()),
         "elapsed_sec": time.perf_counter() - started,
         "forward_max_abs_diff": forward_max_abs_diff,
+        "query_projection_condition": query_projection_condition,
     }

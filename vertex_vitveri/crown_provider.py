@@ -203,8 +203,8 @@ def _target_vector(values, predicted_label, num_classes, device, dtype):
 class CrownBounds:
     initial_target_lowers: object
     alpha_target_lowers: object
-    attention_input_lower: object
-    attention_input_upper: object
+    query_lower: object
+    query_upper: object
     score_lower: object
     score_upper: object
     value_lower: object
@@ -272,8 +272,8 @@ def run_crown_bounds(config, model, image, true_label, predicted_label, image_in
     lower = bounds["lower_bounds"]
     upper = bounds["upper_bounds"]
     value_l, value_u = _checked_bounds(lower, upper, final["v"])
+    query_l, query_u = _checked_bounds(lower, upper, final["q"])
     relu_l, relu_u = _checked_bounds(lower, upper, final["relu_input"])
-    attention_l, attention_u = _checked_bounds(lower, upper, final["attention_input"])
     if bool((score_l > score_u).any().item()):
         raise ValueError("ABCROWN returned inverted attention-score bounds")
     dtype = image.dtype
@@ -292,8 +292,8 @@ def run_crown_bounds(config, model, image, true_label, predicted_label, image_in
             image.device,
             dtype,
         ),
-        attention_input_lower=attention_l.detach().to(image.device, dtype=dtype),
-        attention_input_upper=attention_u.detach().to(image.device, dtype=dtype),
+        query_lower=query_l.detach().to(image.device, dtype=dtype),
+        query_upper=query_u.detach().to(image.device, dtype=dtype),
         score_lower=score_l.detach().to(image.device, dtype=dtype),
         score_upper=score_u.detach().to(image.device, dtype=dtype),
         value_lower=value_l.detach().to(image.device, dtype=dtype),
