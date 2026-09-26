@@ -27,6 +27,38 @@ python test_interval_vertex_softmax.py
 python test_scalable_vertex_softmax.py
 ```
 
+## vitveri Adapter
+
+The fork accepts the central experiment YAML owned by the sibling `vitveri`
+repository. The adapter resolves the existing checkpoint, MNIST sampling seed,
+epsilon, and the sibling alpha-beta-CROWN source tree from that one file.
+
+```bash
+PYTHONPATH=. python -m vertex_vitveri.cli \
+  --config ../vitveri/configs/cone/small_depth1_eps002_cone.yaml \
+  --preflight
+```
+
+The first integration stage performs an adapter check for one image: it loads
+the shared checkpoint and records the selected image and clean prediction. The
+certificate path then applies the upstream exact score-box primitive to the
+final attention block, with a vitveri-specific CROWN prefix and affine/ReLU
+suffix for the CLS-token classifier.
+
+```bash
+PYTHONPATH=. python -m vertex_vitveri.cli \
+  --config ../vitveri/configs/cone/small_depth1_eps002_cone.yaml \
+  --task-id 1 \
+  --check-adapter
+```
+
+```bash
+PYTHONPATH=. python -m vertex_vitveri.cli \
+  --config ../vitveri/configs/cone/small_depth1_eps002_cone.yaml \
+  --task-id 1 \
+  --certify
+```
+
 These checks verify the main Vertex-Softmax primitive: the conservative
 decimal-interval reference agrees with high-precision/exhaustive values, and
 the scalable PyTorch threshold solver agrees with exhaustive vertex enumeration
