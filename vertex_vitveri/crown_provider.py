@@ -193,6 +193,23 @@ def _checked_bounds(lower, upper, node_name):
     return node_lower, node_upper
 
 
+def _stored_or_computed_bounds(bounds, net, image, node_name):
+    lower = bounds["lower_bounds"]
+    upper = bounds["upper_bounds"]
+    if node_name in lower and node_name in upper:
+        return _checked_bounds(lower, upper, node_name)
+    print(f"Computing CROWN bounds for unstored node {node_name}...", flush=True)
+    node_lower, node_upper = net.compute_bounds(
+        x=(image,),
+        method="backward",
+        final_node_name=node_name,
+        reuse_alpha=False,
+    )
+    if bool((node_lower > node_upper).any().item()):
+        raise ValueError(f"ABCROWN returned inverted bounds for node {node_name}")
+    return node_lower, node_upper
+
+
 def run_crown_bounds(config, model, image, true_label, predicted_label, image_index, device):
     abcrown_entry = config.resolve_external_path(config.verification["abcrown_entry"])
     abcrown_config = config.resolve_external_path(config.verification["abcrown_config"])
@@ -242,7 +259,7 @@ def run_crown_bounds(config, model, image, true_label, predicted_label, image_in
     upper = bounds["upper_bounds"]
     value_l, value_u = _checked_bounds(lower, upper, final["v"])
     relu_l, relu_u = _checked_bounds(lower, upper, final["relu_input"])
-    block_l, block_u = _checked_bounds(lower, upper, final["block_input"])
+    block_l, block_u = _stored_or_computed_bounds(bounds, net, image, final["block_input"])
     if bool((score_l > score_u).any().item()):
         raise ValueError("ABCROWN returned inverted attention-score bounds")
     dtype = image.dtype
