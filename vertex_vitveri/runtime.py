@@ -27,7 +27,8 @@ def _load_image_context(config: AdapterConfig, task_id: int):
     import torch
     from torchvision import datasets, transforms
 
-    from vitveri.data.tasks import decode_image_job_index, sampled_mnist_indices
+    from vitveri.data.evaluation import evaluation_indices
+    from vitveri.data.tasks import decode_image_job_index
     from vitveri.models import load_vit
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_vit(config.model, config.weight_path, device)
@@ -45,7 +46,11 @@ def _load_image_context(config: AdapterConfig, task_id: int):
         download=config.training.get("download_mnist", True),
         transform=transform,
     )
-    indices = sampled_mnist_indices(len(dataset), config.sample_size, config.seed)
+    indices = evaluation_indices(
+        config.verification,
+        dataset_size=len(dataset),
+        config_path=config.config_path,
+    )
     image_index = decode_image_job_index(task_id, indices)
     image, true_label = dataset[image_index]
     with torch.no_grad():
