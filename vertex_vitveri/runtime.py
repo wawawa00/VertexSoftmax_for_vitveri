@@ -43,7 +43,7 @@ def _load_image_context(config: AdapterConfig, task_id: int):
     dataset = datasets.MNIST(
         root=config.data_root,
         train=False,
-        download=config.training.get("download_mnist", True),
+        download=config.verification.get("download_mnist", True),
         transform=transform,
     )
     indices = evaluation_indices(
@@ -62,10 +62,12 @@ def _load_image_context(config: AdapterConfig, task_id: int):
 def _result_dir(config):
     from vitveri.run_metadata import vertex_softmax_run_dir
 
-    return config.vitveri_root / vertex_softmax_run_dir(
+    return vertex_softmax_run_dir(
         config.verification,
         config.model,
         config.epsilon,
+        config_path=config.config_path,
+        vertex_config=config.vertex,
     )
 
 
@@ -82,6 +84,8 @@ def _write_metadata(config, output_dir, job_mode):
         config_path=config.config_path,
         output_dir=output_dir,
         verification_config=config.verification,
+        cone_config=config.cone,
+        genbab_config=config.genbab,
         job_mode=job_mode,
     )
     metadata["vertex_softmax"] = config.vertex

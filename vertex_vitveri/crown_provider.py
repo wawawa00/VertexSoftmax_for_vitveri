@@ -236,7 +236,7 @@ def _checked_bounds(lower, upper, node_name):
 
 def run_crown_bounds(config, model, image, true_label, predicted_label, image_index, device):
     abcrown_entry = config.resolve_external_path(config.verification["abcrown_entry"])
-    abcrown_config = config.resolve_external_path(config.verification["abcrown_config"])
+    abcrown_config = config.resolve_external_path(config.cone["crown_config"])
     abcrown_class = load_abcrown_class(abcrown_entry)
     unique = uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix=f"vertex_{image_index}_{unique}_") as directory:

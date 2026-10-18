@@ -54,7 +54,7 @@ def _validate_center_value(name, lower, upper, value):
 def run_direct_crown_bounds(config, model, image, true_label, predicted_label, image_index, device):
     """Run ABCROWN while capturing final-block inputs on its original CROWN pass."""
     abcrown_entry = config.resolve_external_path(config.verification["abcrown_entry"])
-    abcrown_config = config.resolve_external_path(config.verification["abcrown_config"])
+    abcrown_config = config.resolve_external_path(config.cone["crown_config"])
     abcrown_class = load_abcrown_class(abcrown_entry)
     selected_layers, selector = _direct_node_selector(config.model["depth"])
     unique = uuid.uuid4().hex

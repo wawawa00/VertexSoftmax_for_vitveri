@@ -2,7 +2,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from vertex_vitveri.config import load_adapter_config
 from vertex_vitveri.crown_provider import discover_attention_layers
@@ -53,6 +54,28 @@ class FakeNet:
 
 
 class VitveriAdapterConfigTest(unittest.TestCase):
+    def test_both_crown_providers_use_the_new_config_section(self):
+        from vertex_vitveri import crown_provider, direct_crown_provider
+
+        class ReachedVerifier(Exception):
+            pass
+
+        for provider in (crown_provider, direct_crown_provider):
+            config = SimpleNamespace(
+                verification={"abcrown_entry": "engine/abcrown.py"},
+                cone={"crown_config": "bounds/config.yaml"},
+                model={"depth": 1, "num_classes": 10}, epsilon=0.02,
+                resolve_external_path=Mock(side_effect=lambda value: Path("/config") / value),
+            )
+            verifier = Mock(side_effect=ReachedVerifier)
+            function = provider.run_crown_bounds if provider is crown_provider else provider.run_direct_crown_bounds
+            with self.subTest(provider=provider.__name__), \
+                 patch.object(provider, "load_abcrown_class", return_value=verifier), \
+                 patch.object(provider, "generate_vnnlib", return_value="fixture"), \
+                 self.assertRaises(ReachedVerifier):
+                function(config, None, None, 0, 0, 1824, "cpu")
+            self.assertEqual(verifier.call_args.kwargs["args"][:2], ["--config", "/config/bounds/config.yaml"])
+
     def test_loads_all_adapter_inputs_from_one_central_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -67,29 +90,33 @@ class VitveriAdapterConfigTest(unittest.TestCase):
             config_path = vitveri / "configs" / "cone" / "small.yaml"
             config_path.parent.mkdir(parents=True)
             config_path.write_text("placeholder", encoding="utf-8")
+            manifest = vitveri / "indices.txt"
+            manifest.write_text("7\n2\n", encoding="utf-8")
             parsed = {
                 "name": "small_vertex",
                 "model": {"layer_norm_type": "no_var", "pool": "cls", "depth": 1},
-                "training": {"data_root": "data"},
+                "training": {},
                 "verification": {
                     "epsilon": 0.02,
-                    "seed": 42,
-                    "num_samples": 50,
-                    "weight_path": "weights/model.pth",
-                    "vertex_softmax": {"method": "crown_objective_vertex_hybrid", "alpha_iters": 12},
+                    "data_root": "../../data",
+                    "index_file": str(manifest),
+                    "weight_path": "../../weights/model.pth",
                 },
+                "vertex_softmax": {"method": "crown_objective_vertex_hybrid", "alpha_iters": 12},
             }
 
             with patch("vertex_vitveri.config._load_central_config", return_value=parsed):
                 with patch.dict(os.environ, {"VITVERI_ROOT": str(vitveri)}, clear=False):
                     config = load_adapter_config(config_path)
+                    sample_size = config.sample_size
 
         self.assertEqual(config.vitveri_root, vitveri.resolve())
         self.assertEqual(config.alpha_beta_crown_root, crown.resolve())
         self.assertEqual(config.weight_path, weights.resolve())
+        self.assertEqual(config.data_root, (vitveri / "data").resolve())
         self.assertEqual(config.method, "crown_objective_vertex_hybrid")
         self.assertEqual(config.vertex["alpha_iters"], 12)
-        self.assertEqual(config.sample_size, 50)
+        self.assertEqual(sample_size, 2)
 
     def test_rejects_architecture_not_supported_by_adapter(self):
         with tempfile.TemporaryDirectory() as tmpdir:

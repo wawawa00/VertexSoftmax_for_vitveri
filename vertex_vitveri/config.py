@@ -46,42 +46,14 @@ def _load_central_config(config_path, vitveri_root):
     return load_experiment_config(config_path)
 
 
-def _resolve_repository_path(value, *, config_path, vitveri_root, required=True):
-    path = Path(value).expanduser()
-    if path.is_absolute():
-        return path.resolve()
-    candidates = (Path.cwd() / path, vitveri_root / path, config_path.parent / path)
-    if required:
-        return _first_existing(candidates, str(value))
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate.resolve()
-    return (vitveri_root / path).resolve()
-
-
 def _find_alpha_beta_crown(config_path, vitveri_root, verification, vertex):
-    explicit = vertex.get("alpha_beta_crown_root") or os.environ.get("ALPHA_BETA_CROWN_ROOT")
-    candidates = []
-    if explicit:
-        explicit_path = Path(explicit).expanduser()
-        candidates.extend(
-            [
-                explicit_path if explicit_path.is_absolute() else vitveri_root / explicit_path,
-                config_path.parent / explicit_path,
-            ]
-        )
+    from vitveri.config import resolve_config_path
 
-    abcrown_entry = verification.get("abcrown_entry")
-    if abcrown_entry:
-        try:
-            entry = _resolve_repository_path(abcrown_entry, config_path=config_path, vitveri_root=vitveri_root)
-            candidates.append(entry.parents[1])
-        except (FileNotFoundError, IndexError):
-            pass
-    candidates.append(vitveri_root.parent / "GenBaB_for_vitveri" / "alpha-beta-CROWN")
-    for candidate in candidates:
-        if candidate is not None and (Path(candidate).expanduser() / "auto_LiRPA").is_dir():
-            return Path(candidate).expanduser().resolve()
+    explicit = vertex.get("alpha_beta_crown_root") or os.environ.get("ALPHA_BETA_CROWN_ROOT")
+    if explicit:
+        return resolve_config_path(config_path, explicit)
+    if verification.get("abcrown_entry"):
+        return resolve_config_path(config_path, verification["abcrown_entry"]).parents[1]
     return (vitveri_root.parent / "GenBaB_for_vitveri" / "alpha-beta-CROWN").resolve()
 
 
@@ -97,6 +69,8 @@ class AdapterConfig:
     training: dict
     verification: dict
     vertex: dict
+    cone: dict
+    genbab: dict
 
     @property
     def method(self):
@@ -108,11 +82,8 @@ class AdapterConfig:
 
     @property
     def sample_size(self):
-        return int(self.verification.get("num_samples", 50))
-
-    @property
-    def seed(self):
-        return int(self.verification.get("seed", 42))
+        from vitveri.data.evaluation import evaluation_indices
+        return len(evaluation_indices(self.verification, config_path=self.config_path))
 
     def as_dict(self):
         return {
@@ -127,17 +98,16 @@ class AdapterConfig:
             "method": self.method,
             "epsilon": self.epsilon,
             "sample_size": self.sample_size,
-            "seed": self.seed,
             "model": self.model,
             "vertex": self.vertex,
         }
 
     def resolve_external_path(self, value):
-        path = Path(value).expanduser()
-        if path.is_absolute():
-            return path.resolve()
-        candidates = (Path.cwd() / path, self.vitveri_root / path, self.config_path.parent / path)
-        return _first_existing(candidates, str(value))
+        from vitveri.config import resolve_config_path
+        path = resolve_config_path(self.config_path, value)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        return path
 
 
 def load_adapter_config(path, *, vitveri_root=None):
@@ -153,15 +123,15 @@ def load_adapter_config(path, *, vitveri_root=None):
     if not isinstance(model, dict) or not isinstance(training, dict) or not isinstance(verification, dict):
         raise ValueError("Config requires model, training, and verification mappings")
 
-    vertex = dict(verification.get("vertex_softmax") or {})
+    vertex = dict(config.get("vertex_softmax") or {})
     vertex.setdefault("method", "crown_objective_vertex_hybrid")
     vertex.setdefault("crown_method", "CROWN")
     vertex.setdefault("alpha_iters", 20)
     if vertex["method"] not in SUPPORTED_METHODS:
         choices = ", ".join(sorted(SUPPORTED_METHODS))
-        raise ValueError(f"Unsupported verification.vertex_softmax.method={vertex['method']!r}; choose one of {choices}")
+        raise ValueError(f"Unsupported vertex_softmax.method={vertex['method']!r}; choose one of {choices}")
     if vertex["crown_method"] not in {"CROWN", "alpha-CROWN"}:
-        raise ValueError("verification.vertex_softmax.crown_method must be CROWN or alpha-CROWN")
+        raise ValueError("vertex_softmax.crown_method must be CROWN or alpha-CROWN")
     if model.get("layer_norm_type") != "no_var":
         raise ValueError("The vitveri Vertex adapter currently requires model.layer_norm_type=no_var")
     if model.get("pool") != "cls":
@@ -170,16 +140,10 @@ def load_adapter_config(path, *, vitveri_root=None):
     weight_value = verification.get("weight_path") or training.get("output_path")
     if not weight_value:
         raise ValueError("Config requires verification.weight_path or training.output_path")
-    weight_path = _resolve_repository_path(
-        weight_value,
-        config_path=config_path,
-        vitveri_root=resolved_vitveri_root,
-        required=False,
-    )
-    data_value = training.get("data_root", "data")
-    data_path = Path(data_value).expanduser()
-    if not data_path.is_absolute():
-        data_path = resolved_vitveri_root / data_path
+    from vitveri.config import resolve_config_path
+    weight_path = resolve_config_path(config_path, weight_value)
+    data_value = verification.get("data_root", "data")
+    data_path = resolve_config_path(config_path, data_value)
 
     return AdapterConfig(
         config_path=config_path,
@@ -197,4 +161,6 @@ def load_adapter_config(path, *, vitveri_root=None):
         training=dict(training),
         verification=dict(verification),
         vertex=vertex,
+        cone=dict(config.get("cone") or {}),
+        genbab=dict(config.get("genbab") or {}),
     )

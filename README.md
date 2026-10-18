@@ -30,8 +30,11 @@ python test_scalable_vertex_softmax.py
 ## vitveri Adapter
 
 The fork accepts the central experiment YAML owned by the sibling `vitveri`
-repository. The adapter resolves the existing checkpoint, MNIST sampling seed,
+repository. The adapter resolves the existing checkpoint and fixed MNIST index manifest,
 epsilon, and the sibling alpha-beta-CROWN source tree from that one file.
+Paths written in that config are relative to the config file's directory,
+including checkpoint, dataset root, result root, and explicit external source
+paths. The adapter does not search the working directory for a checkpoint.
 
 ```bash
 PYTHONPATH=. python -m vertex_vitveri.cli \
