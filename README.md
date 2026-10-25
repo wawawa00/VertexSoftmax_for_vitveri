@@ -5,6 +5,13 @@ It intentionally excludes raw datasets, generated results, private cluster
 submission wrappers, logs, notebooks, review notes, and local machine metadata.
 It is a script-based source release rather than an installable Python package.
 
+The vitveri adapter uses the central `vitveri/configs/common/` configs. Its shared
+`crown` settings generate an ABCROWN YAML per image, saved with the CSV/VNNLIB
+under the result directory; metadata records the artifact hashes. External
+`cone.crown_config` inputs have been removed; all experiment configs now contain
+central `crown` settings. The standard and direct providers
+share this input preparation without changing their bound algorithms.
+
 ## Contents
 
 - `interval_vertex_softmax.py`: conservative decimal-interval reference evaluator.
@@ -38,7 +45,7 @@ paths. The adapter does not search the working directory for a checkpoint.
 
 ```bash
 PYTHONPATH=. python -m vertex_vitveri.cli \
-  --config ../vitveri/configs/cone/small_depth1_eps002_cone.yaml \
+  --config ../vitveri/configs/common/small_depth1_eps002.yaml \
   --preflight
 ```
 
@@ -53,14 +60,14 @@ to the final transformer block and Vertex-Softmax certifies that final block.
 
 ```bash
 PYTHONPATH=. python -m vertex_vitveri.cli \
-  --config ../vitveri/configs/cone/small_depth1_eps002_cone.yaml \
+  --config ../vitveri/configs/common/small_depth1_eps002.yaml \
   --task-id 1 \
   --check-adapter
 ```
 
 ```bash
 PYTHONPATH=. python -m vertex_vitveri.cli \
-  --config ../vitveri/configs/cone/small_depth1_eps002_cone.yaml \
+  --config ../vitveri/configs/common/small_depth1_eps002.yaml \
   --task-id 1 \
   --certify
 ```

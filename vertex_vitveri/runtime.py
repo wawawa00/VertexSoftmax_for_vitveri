@@ -60,6 +60,8 @@ def _load_image_context(config: AdapterConfig, task_id: int):
 
 
 def _result_dir(config):
+    if getattr(config, "output_dir", None) is not None:
+        return config.output_dir
     from vitveri.run_metadata import vertex_softmax_run_dir
 
     return vertex_softmax_run_dir(
@@ -90,6 +92,8 @@ def _write_metadata(config, output_dir, job_mode):
     )
     metadata["vertex_softmax"] = config.vertex
     metadata["alpha_beta_crown_root"] = str(config.alpha_beta_crown_root)
+    if config.crown_artifacts:
+        metadata["crown_artifacts"] = config.crown_artifacts
     return write_run_metadata(output_dir, metadata, config.config_path)
 
 
@@ -120,6 +124,8 @@ def run_certification(config: AdapterConfig, task_id: int):
     if not (config.alpha_beta_crown_root / "auto_LiRPA").is_dir():
         raise FileNotFoundError(f"auto_LiRPA source tree is missing under {config.alpha_beta_crown_root}")
     model, image, true_label, predicted_label, image_index, device = _load_image_context(config, task_id)
+    if (_result_dir(config) / f"vertex_result_idx{image_index}.json").exists():
+        raise FileExistsError("Vertex result already exists; choose a new --output-dir")
     from .certifier import certify_image
     from .crown_provider import run_crown_bounds
 

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 
 SUPPORTED_METHODS = {
@@ -71,6 +72,9 @@ class AdapterConfig:
     vertex: dict
     cone: dict
     genbab: dict
+    crown: dict = field(default_factory=dict)
+    crown_artifacts: list = field(default_factory=list)
+    output_dir: Optional[Path] = None
 
     @property
     def method(self):
@@ -117,6 +121,8 @@ def load_adapter_config(path, *, vitveri_root=None):
 
     resolved_vitveri_root = _find_vitveri_root(config_path, vitveri_root)
     config = _load_central_config(config_path, resolved_vitveri_root)
+    if not isinstance(config.get("crown"), dict):
+        raise ValueError("Central crown settings are required; external CROWN YAML paths are no longer supported")
     model = config.get("model")
     training = config.get("training")
     verification = config.get("verification")
@@ -163,4 +169,5 @@ def load_adapter_config(path, *, vitveri_root=None):
         vertex=vertex,
         cone=dict(config.get("cone") or {}),
         genbab=dict(config.get("genbab") or {}),
+        crown=dict(config["crown"]),
     )

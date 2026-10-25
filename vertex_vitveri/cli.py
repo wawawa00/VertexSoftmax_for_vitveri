@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
+from pathlib import Path
 
 from .config import load_adapter_config
 from .runtime import run_adapter_check, run_certification
@@ -11,6 +13,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run Vertex-Softmax from a central vitveri experiment config.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--task-id", type=int)
+    parser.add_argument("--output-dir", help="Explicit result directory; relative to the current directory.")
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--check-adapter", action="store_true")
     parser.add_argument("--certify", action="store_true")
@@ -25,6 +28,8 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     config = load_adapter_config(args.config)
+    if args.output_dir:
+        config = replace(config, output_dir=Path(args.output_dir).resolve())
     if args.preflight:
         result = config.as_dict()
     elif args.check_adapter:

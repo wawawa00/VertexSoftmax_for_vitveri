@@ -3,10 +3,10 @@ from __future__ import annotations
 import importlib.util
 import math
 import sys
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from contextlib import contextmanager
 
 
 def load_abcrown_class(abcrown_path):
@@ -179,16 +179,7 @@ def _score_bounds(bounds, net, image, model, layer):
                 break
             print(f"Ignoring inverted stored score bounds for node {node}.", flush=True)
     if score_l is None:
-        node = layer["score_fallback_final_node"]
-        score_l, score_u = net.compute_bounds(
-            x=(image,),
-            method="backward",
-            final_node_name=node,
-            reuse_alpha=False,
-        )
-        scale_mode = layer["score_fallback_scale"]
-        if bool((score_l > score_u).any().item()):
-            raise ValueError(f"ABCROWN returned inverted attention-score bounds for fallback node {node}")
+        raise RuntimeError("Saved score bounds are required; check cone.crown_overrides.solver.invprop.directly_optimize")
     if scale_mode == "by_dim":
         scale = 1.0 / math.sqrt(model.dim // model.heads)
         score_l, score_u = score_l * scale, score_u * scale
@@ -234,26 +225,33 @@ def _checked_bounds(lower, upper, node_name):
     return node_lower, node_upper
 
 
+@contextmanager
+def crown_instance(config, image, true_label, predicted_label, image_index):
+    """Generate and retain engine inputs with the image result."""
+    unique = uuid.uuid4().hex
+    from .runtime import _result_dir
+    from vitveri.crown.config import write_crown_config
+    from vitveri.run_metadata import file_provenance
+    directory = _result_dir(config) / f"image_{image_index}" / "crown" / unique
+    directory.mkdir(parents=True, exist_ok=False)
+    vnnlib = directory / "property.vnnlib"
+    instances = directory / "instances.csv"
+    vnnlib.write_text(generate_vnnlib(image, true_label, predicted_label, config.epsilon, config.model["num_classes"]), encoding="utf-8")
+    instances.write_text(f"{vnnlib}\n", encoding="utf-8")
+    experiment = {"model": config.model, "verification": config.verification,
+                  "crown": config.crown, "cone": config.cone}
+    abcrown_config = write_crown_config(
+        experiment, config_path=config.config_path, purpose="cone",
+        instances_csv=instances, output_path=directory / "abcrown.yaml",
+    )
+    config.crown_artifacts.extend(file_provenance(path) for path in (abcrown_config, instances, vnnlib))
+    yield abcrown_config, instances
+
+
 def run_crown_bounds(config, model, image, true_label, predicted_label, image_index, device):
     abcrown_entry = config.resolve_external_path(config.verification["abcrown_entry"])
-    abcrown_config = config.resolve_external_path(config.cone["crown_config"])
     abcrown_class = load_abcrown_class(abcrown_entry)
-    unique = uuid.uuid4().hex
-    with tempfile.TemporaryDirectory(prefix=f"vertex_{image_index}_{unique}_") as directory:
-        directory = Path(directory)
-        vnnlib = directory / "property.vnnlib"
-        instances = directory / "instances.csv"
-        vnnlib.write_text(
-            generate_vnnlib(
-                image,
-                true_label,
-                predicted_label,
-                config.epsilon,
-                config.model["num_classes"],
-            ),
-            encoding="utf-8",
-        )
-        instances.write_text(f"{vnnlib}\n", encoding="utf-8")
+    with crown_instance(config, image, true_label, predicted_label, image_index) as (abcrown_config, instances):
         verifier = abcrown_class(
             args=[
                 "--config",

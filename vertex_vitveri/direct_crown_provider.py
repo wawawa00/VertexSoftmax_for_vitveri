@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import tempfile
-import uuid
-from pathlib import Path
-
 from .crown_provider import (
     CrownBounds,
     _checked_bounds,
     _score_bounds,
     _target_vector,
     discover_attention_layers,
-    generate_vnnlib,
     load_abcrown_class,
+    crown_instance,
 )
 from .direct_crown_hook import CAPTURE_ATTRIBUTE, capture_intermediate_bounds
 
@@ -54,26 +50,9 @@ def _validate_center_value(name, lower, upper, value):
 def run_direct_crown_bounds(config, model, image, true_label, predicted_label, image_index, device):
     """Run ABCROWN while capturing final-block inputs on its original CROWN pass."""
     abcrown_entry = config.resolve_external_path(config.verification["abcrown_entry"])
-    abcrown_config = config.resolve_external_path(config.cone["crown_config"])
     abcrown_class = load_abcrown_class(abcrown_entry)
     selected_layers, selector = _direct_node_selector(config.model["depth"])
-    unique = uuid.uuid4().hex
-
-    with tempfile.TemporaryDirectory(prefix=f"vertex_direct_{image_index}_{unique}_") as directory:
-        directory = Path(directory)
-        vnnlib = directory / "property.vnnlib"
-        instances = directory / "instances.csv"
-        vnnlib.write_text(
-            generate_vnnlib(
-                image,
-                true_label,
-                predicted_label,
-                config.epsilon,
-                config.model["num_classes"],
-            ),
-            encoding="utf-8",
-        )
-        instances.write_text(f"{vnnlib}\n", encoding="utf-8")
+    with crown_instance(config, image, true_label, predicted_label, image_index) as (abcrown_config, instances):
         verifier = abcrown_class(
             args=[
                 "--config",

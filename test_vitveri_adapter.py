@@ -54,27 +54,63 @@ class FakeNet:
 
 
 class VitveriAdapterConfigTest(unittest.TestCase):
-    def test_both_crown_providers_use_the_new_config_section(self):
+    def test_explicit_output_dir_takes_precedence_without_editing_config(self):
+        from vertex_vitveri.cli import parse_args
+        from vertex_vitveri.runtime import _result_dir
+        args = parse_args(["--config", "config.yaml", "--task-id", "1", "--certify", "--output-dir", "result"])
+        self.assertEqual(args.output_dir, "result")
+        directory = Path("/explicit/result")
+        self.assertEqual(_result_dir(SimpleNamespace(output_dir=directory)), directory)
+
+    def test_unified_run_refuses_existing_result_before_crown(self):
+        from vertex_vitveri import runtime
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "auto_LiRPA").mkdir()
+            result = root / "vertex_result_idx1824.json"
+            result.write_text("previous result")
+            config = SimpleNamespace(alpha_beta_crown_root=root, crown={"general": {}})
+            with patch.object(runtime, "_load_image_context", return_value=(None, None, 2, 2, 1824, "cpu")), \
+                 patch.object(runtime, "_result_dir", return_value=root):
+                with self.assertRaises(FileExistsError):
+                    runtime.run_certification(config, 1)
+            self.assertEqual(result.read_text(), "previous result")
+
+    def test_unified_yaml_and_inputs_are_retained_by_both_providers(self):
+        import yaml
         from vertex_vitveri import crown_provider, direct_crown_provider
 
         class ReachedVerifier(Exception):
             pass
 
-        for provider in (crown_provider, direct_crown_provider):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "weights.pth").write_bytes(b"weights")
             config = SimpleNamespace(
-                verification={"abcrown_entry": "engine/abcrown.py"},
-                cone={"crown_config": "bounds/config.yaml"},
-                model={"depth": 1, "num_classes": 10}, epsilon=0.02,
-                resolve_external_path=Mock(side_effect=lambda value: Path("/config") / value),
+                config_path=root / "experiment.yaml", epsilon=0.02,
+                verification={"abcrown_entry": "abcrown.py", "weight_path": "weights.pth"},
+                model={"image_size": 8, "patch_size": 4, "num_classes": 10, "channels": 1,
+                       "dim": 8, "depth": 1, "heads": 1, "mlp_dim": 16,
+                       "layer_norm_type": "no_var", "pool": "cls", "dim_head": 8},
+                crown={"general": {}, "model": {}, "solver": {"batch_size": 50}},
+                cone={"crown_overrides": {"general": {"complete_verifier": "skip"}}},
+                crown_artifacts=[], resolve_external_path=lambda value: root / value,
             )
-            verifier = Mock(side_effect=ReachedVerifier)
-            function = provider.run_crown_bounds if provider is crown_provider else provider.run_direct_crown_bounds
-            with self.subTest(provider=provider.__name__), \
-                 patch.object(provider, "load_abcrown_class", return_value=verifier), \
-                 patch.object(provider, "generate_vnnlib", return_value="fixture"), \
-                 self.assertRaises(ReachedVerifier):
-                function(config, None, None, 0, 0, 1824, "cpu")
-            self.assertEqual(verifier.call_args.kwargs["args"][:2], ["--config", "/config/bounds/config.yaml"])
+            for provider in (crown_provider, direct_crown_provider):
+                verifier = Mock(side_effect=ReachedVerifier)
+                function = provider.run_crown_bounds if provider is crown_provider else provider.run_direct_crown_bounds
+                with patch.object(provider, "load_abcrown_class", return_value=verifier), \
+                     patch.object(crown_provider, "generate_vnnlib", return_value="fixture"), \
+                     patch("vertex_vitveri.runtime._result_dir", return_value=root / "result"), \
+                     self.assertRaises(ReachedVerifier):
+                    function(config, None, None, 2, 2, 1824, "cpu")
+                path = Path(verifier.call_args.kwargs["args"][1])
+                engine = yaml.safe_load(path.read_text())
+                self.assertEqual(engine["solver"]["batch_size"], 50)
+                self.assertEqual(engine["general"]["complete_verifier"], "skip")
+                self.assertTrue(Path(engine["general"]["csv_name"]).is_file())
+                self.assertTrue((path.parent / "property.vnnlib").is_file())
+            self.assertEqual(len(config.crown_artifacts), 6)
 
     def test_loads_all_adapter_inputs_from_one_central_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -94,6 +130,7 @@ class VitveriAdapterConfigTest(unittest.TestCase):
             manifest.write_text("7\n2\n", encoding="utf-8")
             parsed = {
                 "name": "small_vertex",
+                "crown": {},
                 "model": {"layer_norm_type": "no_var", "pool": "cls", "depth": 1},
                 "training": {},
                 "verification": {
@@ -126,6 +163,7 @@ class VitveriAdapterConfigTest(unittest.TestCase):
             config_path.write_text("placeholder", encoding="utf-8")
             parsed = {
                 "model": {"layer_norm_type": "standard", "pool": "cls"},
+                "crown": {},
                 "training": {},
                 "verification": {"epsilon": 0.01, "weight_path": "missing.pth"},
             }
@@ -135,6 +173,13 @@ class VitveriAdapterConfigTest(unittest.TestCase):
 
 
 class CrownProviderTest(unittest.TestCase):
+    def test_unified_score_bounds_do_not_recompute_without_perturbation(self):
+        from vertex_vitveri.crown_provider import _score_bounds
+        net = SimpleNamespace(compute_bounds=Mock())
+        with self.assertRaisesRegex(RuntimeError, "Saved score bounds"):
+            _score_bounds({"lower_bounds": {}, "upper_bounds": {}}, net, None, None, {})
+        net.compute_bounds.assert_not_called()
+
     def test_discovers_scaled_attention_nodes(self):
         block_input = FakeNode("/block_input")
         mean = BoundReduceMean("/mean", [block_input], nonlinear=False)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
 
 from .cli import parse_args
 from .config import load_adapter_config
@@ -55,6 +57,8 @@ def _run_direct_certification(config, task_id):
 def main(argv=None):
     args = parse_args(argv)
     config = load_adapter_config(args.config)
+    if args.output_dir:
+        config = replace(config, output_dir=Path(args.output_dir).resolve())
     if args.preflight:
         result = config.as_dict()
     elif args.check_adapter:
