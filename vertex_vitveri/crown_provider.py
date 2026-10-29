@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import math
 import sys
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from contextlib import contextmanager
@@ -228,11 +227,10 @@ def _checked_bounds(lower, upper, node_name):
 @contextmanager
 def crown_instance(config, image, true_label, predicted_label, image_index):
     """Generate and retain engine inputs with the image result."""
-    unique = uuid.uuid4().hex
     from .runtime import _result_dir
     from vitveri.crown.config import write_crown_config
     from vitveri.run_metadata import file_provenance
-    directory = _result_dir(config) / f"image_{image_index}" / "crown" / unique
+    directory = _result_dir(config) / f"image_{image_index}" / "crown"
     directory.mkdir(parents=True, exist_ok=False)
     vnnlib = directory / "property.vnnlib"
     instances = directory / "instances.csv"

@@ -124,7 +124,9 @@ def run_certification(config: AdapterConfig, task_id: int):
     if not (config.alpha_beta_crown_root / "auto_LiRPA").is_dir():
         raise FileNotFoundError(f"auto_LiRPA source tree is missing under {config.alpha_beta_crown_root}")
     model, image, true_label, predicted_label, image_index, device = _load_image_context(config, task_id)
-    if (_result_dir(config) / f"vertex_result_idx{image_index}.json").exists():
+    output_dir = _result_dir(config)
+    result_path = output_dir / f"image_{image_index}" / "result.json"
+    if result_path.exists() or (output_dir / f"vertex_result_idx{image_index}.json").exists():
         raise FileExistsError("Vertex result already exists; choose a new --output-dir")
     from .certifier import certify_image
     from .crown_provider import run_crown_bounds
@@ -169,10 +171,9 @@ def run_certification(config: AdapterConfig, task_id: int):
         "attention_nodes": crown_bounds.attention_layers,
         **certificate,
     }
-    output_dir = _result_dir(config)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
     _write_metadata(config, output_dir, "image")
-    result_path = output_dir / f"vertex_result_idx{image_index}.json"
-    result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with result_path.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     result["output_path"] = str(result_path)
     return result

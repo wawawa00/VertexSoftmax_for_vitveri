@@ -11,6 +11,13 @@ under the result directory; metadata records the artifact hashes. External
 `cone.crown_config` inputs have been removed; all experiment configs now contain
 central `crown` settings. The standard and direct providers
 share this input preparation without changing their bound algorithms.
+Per-image inputs are retained under `image_<index>/crown/` without a UUID
+subdirectory. An existing input directory is never overwritten; retries must
+use a new run/output directory. Historical UUID-based results are not moved.
+Final certificates are saved to `image_<index>/result.json`, beside `crown/`.
+Run-wide metadata and the config snapshot remain in the run directory.
+Existing `vertex_result_idx<index>.json` files are preserved, and either result
+layout blocks rerunning that image in the same run directory.
 
 ## Contents
 

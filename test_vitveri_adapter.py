@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -67,14 +68,50 @@ class VitveriAdapterConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "auto_LiRPA").mkdir()
-            result = root / "vertex_result_idx1824.json"
-            result.write_text("previous result")
             config = SimpleNamespace(alpha_beta_crown_root=root, crown={"general": {}})
-            with patch.object(runtime, "_load_image_context", return_value=(None, None, 2, 2, 1824, "cpu")), \
-                 patch.object(runtime, "_result_dir", return_value=root):
-                with self.assertRaises(FileExistsError):
-                    runtime.run_certification(config, 1)
-            self.assertEqual(result.read_text(), "previous result")
+            for result in (root / "image_1824/result.json", root / "vertex_result_idx1824.json"):
+                with self.subTest(path=result):
+                    result.parent.mkdir(parents=True, exist_ok=True)
+                    result.write_text("previous result")
+                    with patch.object(runtime, "_load_image_context", return_value=(None, None, 2, 2, 1824, "cpu")), \
+                         patch.object(runtime, "_result_dir", return_value=root), \
+                         patch("vertex_vitveri.crown_provider.run_crown_bounds") as bounds:
+                        with self.assertRaises(FileExistsError):
+                            runtime.run_certification(config, 1)
+                    bounds.assert_not_called()
+                    self.assertEqual(result.read_text(), "previous result")
+                    result.unlink()
+
+    def test_certification_saves_result_beside_each_images_crown_inputs(self):
+        from vertex_vitveri import runtime
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "auto_LiRPA").mkdir()
+            config = SimpleNamespace(
+                alpha_beta_crown_root=root, epsilon=0.019, weight_path=root / "weights.pth",
+                method="crown_objective_vertex_hybrid", vertex={"crown_method": "CROWN", "alpha_iters": 20},
+            )
+            image = Mock()
+            bound_data = SimpleNamespace(attention_layers=[{"q": "/q"}])
+            certificate = {"certified": True, "target_lowers": [1.0, 2.0], "elapsed_sec": 0.25}
+            for task, image_index in ((1, 1824), (2, 3109)):
+                with patch.object(runtime, "_load_image_context", return_value=(None, image, 2, 2, image_index, "cpu")), \
+                     patch.object(runtime, "_result_dir", return_value=root), \
+                     patch("vertex_vitveri.crown_provider.run_crown_bounds", return_value=bound_data), \
+                     patch("vertex_vitveri.certifier.certify_image", return_value=dict(certificate)), \
+                     patch.object(runtime, "_write_metadata") as metadata:
+                    result = runtime.run_certification(config, task)
+                path = root / f"image_{image_index}/result.json"
+                saved = json.loads(path.read_text())
+                self.assertEqual(result["output_path"], str(path))
+                self.assertEqual(saved["image_index"], image_index)
+                self.assertEqual(saved["task_id"], task)
+                self.assertEqual(saved["certified"], certificate["certified"])
+                self.assertEqual(saved["target_lowers"], certificate["target_lowers"])
+                self.assertEqual(saved["postprocess_elapsed_sec"], 0.25)
+                self.assertEqual(saved["attention_nodes"], bound_data.attention_layers)
+                self.assertFalse((root / f"vertex_result_idx{image_index}.json").exists())
+                metadata.assert_called_once_with(config, root, "image")
 
     def test_unified_yaml_and_inputs_are_retained_by_both_providers(self):
         import yaml
@@ -97,19 +134,28 @@ class VitveriAdapterConfigTest(unittest.TestCase):
                 crown_artifacts=[], resolve_external_path=lambda value: root / value,
             )
             for provider in (crown_provider, direct_crown_provider):
+                output = root / provider.__name__.rsplit(".", 1)[-1]
                 verifier = Mock(side_effect=ReachedVerifier)
                 function = provider.run_crown_bounds if provider is crown_provider else provider.run_direct_crown_bounds
                 with patch.object(provider, "load_abcrown_class", return_value=verifier), \
                      patch.object(crown_provider, "generate_vnnlib", return_value="fixture"), \
-                     patch("vertex_vitveri.runtime._result_dir", return_value=root / "result"), \
+                     patch("vertex_vitveri.runtime._result_dir", return_value=output), \
                      self.assertRaises(ReachedVerifier):
                     function(config, None, None, 2, 2, 1824, "cpu")
                 path = Path(verifier.call_args.kwargs["args"][1])
+                self.assertEqual(path, output / "image_1824/crown/abcrown.yaml")
                 engine = yaml.safe_load(path.read_text())
                 self.assertEqual(engine["solver"]["batch_size"], 50)
                 self.assertEqual(engine["general"]["complete_verifier"], "skip")
                 self.assertTrue(Path(engine["general"]["csv_name"]).is_file())
                 self.assertTrue((path.parent / "property.vnnlib").is_file())
+                before = {file.name: file.read_bytes() for file in path.parent.iterdir()}
+                with patch.object(provider, "load_abcrown_class", return_value=verifier), \
+                     patch("vertex_vitveri.runtime._result_dir", return_value=output), \
+                     self.assertRaises(FileExistsError):
+                    function(config, None, None, 2, 2, 1824, "cpu")
+                verifier.assert_called_once()
+                self.assertEqual(before, {file.name: file.read_bytes() for file in path.parent.iterdir()})
             self.assertEqual(len(config.crown_artifacts), 6)
 
     def test_loads_all_adapter_inputs_from_one_central_config(self):
