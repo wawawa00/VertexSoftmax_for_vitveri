@@ -90,6 +90,7 @@ class VitveriAdapterConfigTest(unittest.TestCase):
             config = SimpleNamespace(
                 alpha_beta_crown_root=root, epsilon=0.019, weight_path=root / "weights.pth",
                 method="crown_objective_vertex_hybrid", vertex={"crown_method": "CROWN", "alpha_iters": 20},
+                crown_artifacts=[{"path": "property.vnnlib", "sha256": "test"}],
             )
             image = Mock()
             bound_data = SimpleNamespace(attention_layers=[{"q": "/q"}])
@@ -110,8 +111,25 @@ class VitveriAdapterConfigTest(unittest.TestCase):
                 self.assertEqual(saved["target_lowers"], certificate["target_lowers"])
                 self.assertEqual(saved["postprocess_elapsed_sec"], 0.25)
                 self.assertEqual(saved["attention_nodes"], bound_data.attention_layers)
+                self.assertEqual(saved["crown_artifacts"], config.crown_artifacts)
                 self.assertFalse((root / f"vertex_result_idx{image_index}.json").exists())
-                metadata.assert_called_once_with(config, root, "image")
+                self.assertEqual(metadata.call_count, 2)
+                metadata.assert_called_with(config, root, "image")
+
+    def test_incompatible_metadata_stops_before_crown(self):
+        from vertex_vitveri import runtime
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "auto_LiRPA").mkdir()
+            config = SimpleNamespace(alpha_beta_crown_root=root)
+            with patch.object(runtime, "_load_image_context", return_value=(None, Mock(), 2, 2, 1824, "cpu")), \
+                 patch.object(runtime, "_result_dir", return_value=root), \
+                 patch.object(runtime, "_write_metadata", side_effect=ValueError("Run input differs")), \
+                 patch("vertex_vitveri.crown_provider.run_crown_bounds") as bounds:
+                with self.assertRaisesRegex(ValueError, "Run input differs"):
+                    runtime.run_certification(config, 1)
+            bounds.assert_not_called()
+            self.assertFalse((root / "image_1824").exists())
 
     def test_unified_yaml_and_inputs_are_retained_by_both_providers(self):
         import yaml

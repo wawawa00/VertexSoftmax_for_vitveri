@@ -31,9 +31,7 @@ def _attention_forward(attention_residual, z, *, return_parts=False):
     k = _split_heads(attention.to_k(attention_input), attention.heads)
     v = _split_heads(attention.to_v(attention_input), attention.heads)
     scores = q.matmul(k.transpose(-1, -2)) * attention.scale
-    shifted = scores - scores.amax(dim=-1, keepdim=True)
-    exponentials = torch.exp(shifted)
-    probabilities = exponentials / exponentials.sum(dim=-1, keepdim=True)
+    probabilities = torch.softmax(scores, dim=-1)
     context = probabilities.matmul(v).transpose(1, 2).reshape(z.shape)
     output = attention.to_out[0] if isinstance(attention.to_out, torch.nn.Sequential) else attention.to_out
     residual = z + output(context)

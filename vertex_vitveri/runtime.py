@@ -128,6 +128,7 @@ def run_certification(config: AdapterConfig, task_id: int):
     result_path = output_dir / f"image_{image_index}" / "result.json"
     if result_path.exists() or (output_dir / f"vertex_result_idx{image_index}.json").exists():
         raise FileExistsError("Vertex result already exists; choose a new --output-dir")
+    _write_metadata(config, output_dir, "image")
     from .certifier import certify_image
     from .crown_provider import run_crown_bounds
 
@@ -169,6 +170,7 @@ def run_certification(config: AdapterConfig, task_id: int):
         "device": str(device),
         "job_id": os.environ.get("JOB_ID", ""),
         "attention_nodes": crown_bounds.attention_layers,
+        "crown_artifacts": list(config.crown_artifacts),
         **certificate,
     }
     result_path.parent.mkdir(parents=True, exist_ok=True)
