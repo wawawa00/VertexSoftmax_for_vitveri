@@ -128,6 +128,8 @@ def load_adapter_config(path, *, vitveri_root=None):
     verification = config.get("verification")
     if not isinstance(model, dict) or not isinstance(training, dict) or not isinstance(verification, dict):
         raise ValueError("Config requires model, training, and verification mappings")
+    if type(model.get("use_ffn", True)) is not bool or not model.get("use_ffn", True):
+        raise ValueError("Vertex adapter currently requires model.use_ffn=True; attention-only is unsupported")
 
     vertex = dict(config.get("vertex_softmax") or {})
     vertex.setdefault("method", "crown_objective_vertex_hybrid")

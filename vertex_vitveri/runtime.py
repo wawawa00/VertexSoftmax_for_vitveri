@@ -20,6 +20,8 @@ def install_source_paths(config: AdapterConfig):
 
 
 def _load_image_context(config: AdapterConfig, task_id: int):
+    if type(config.model.get("use_ffn", True)) is not bool or not config.model.get("use_ffn", True):
+        raise ValueError("Vertex adapter currently requires model.use_ffn=True; attention-only is unsupported")
     if not config.weight_path.is_file():
         raise FileNotFoundError(f"Checkpoint does not exist: {config.weight_path}")
     install_source_paths(config)
